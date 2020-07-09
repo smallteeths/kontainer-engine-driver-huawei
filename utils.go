@@ -15,11 +15,11 @@ import (
 	"github.com/cnrancher/huaweicloud-sdk/network"
 	"github.com/pkg/errors"
 	"github.com/rancher/kontainer-engine/types"
-	"github.com/rancher/types/apis/management.cattle.io/v3"
+	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/rbac/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -328,6 +328,10 @@ func fillCreateOptions(driverFlag *types.DriverFlags) {
 		Usage: "The share type of bandwidth",
 		Value: "PER",
 	}
+	driverFlag.Options["vip-subnet-id"] = &types.Flag{
+		Type:  types.StringType,
+		Usage: "VipSubnetID",
+	}
 }
 
 func createVPC(ctx context.Context, networkClient *network.Client, state *state) (*common.VpcInfo, error) {
@@ -454,27 +458,14 @@ func createEIP(ctx context.Context, networkClient *network.Client, state *state)
 func createELB(ctx context.Context, elbClient *elb.Client, eip *common.EipInfo, state *state) (*common.LoadBalancerInfo, error) {
 	logrus.Info("creating ELB")
 	input := common.LoadBalancerRequest{
-		ChargeMode:    "traffic",
-		AvailableZone: state.NodeConfig.AvailableZone,
-		TenantID:      elbClient.ProjectID,
-
-		UpdatableLoadBalancerAttribute: common.UpdatableLoadBalancerAttribute{
-			AdminStateUp: 1,
-			Name:         state.ClusterName + "-entrypoint",
-			Description:  fmt.Sprintf("ELB for cce cluster %s api server", state.ClusterName),
+		Loadbalancer: common.LoadbalancerObject{
+			ProjectId: elbClient.ProjectID,
+			UpdatableLoadBalancerAttribute: common.UpdatableLoadBalancerAttribute{
+				Name:        state.ClusterName + "-entrypoint",
+				Description: fmt.Sprintf("ELB for cce cluster %s api server", state.ClusterName),
+			},
+			VipSubnetID: state.VipSubnetID,
 		},
-		LoadBalancerCommonInfo: common.LoadBalancerCommonInfo{
-			Type:  "External",
-			VpcID: state.VpcID,
-		},
-	}
-
-	if eip == nil {
-		input.ChargeMode = "traffic"
-		input.EIPType = "5_bgp"
-		input.Bandwidth = 10
-	} else {
-		input.VIPAddress = eip.Addr
 	}
 
 	info, err := elbClient.CreateLoadBalancer(ctx, &input)
@@ -482,26 +473,19 @@ func createELB(ctx context.Context, elbClient *elb.Client, eip *common.EipInfo, 
 		return nil, err
 	}
 	logrus.Info("create ELB success")
-	state.APIServerELBID = info.ID
+	state.APIServerELBID = info.Loadbalancer.ID
 	return info, nil
 }
 
 func createListener(ctx context.Context, elbClient *elb.Client, state *state) (*common.ELBListenerInfo, error) {
 	logrus.Infof("creating listener for %s ...", state.APIServerELBID)
 	input := common.ELBListenerRequest{
-		ELBListenerCommon: common.ELBListenerCommon{
-			LoadbalancerID:  state.APIServerELBID,
-			Protocol:        "TCP",
-			BackendProtocol: "TCP",
-			SessionSticky:   true,
-		},
-		UpdatableELBListenerAttribute: common.UpdatableELBListenerAttribute{
-			BackendPort: 3389,
-			LBAlgorithm: "roundrobin",
-			Name:        state.ClusterName + "-apiserver",
-			Port:        5443,
-			TCPTimeout:  10,
-			Description: fmt.Sprintf("proxy cce cluster %s apiserver", state.ClusterName),
+		Listener: common.ELBListenerRequestObject{
+			LoadbalancerId: state.APIServerELBID,
+			Protocol:       "TCP",
+			ProtocolPort:   5443,
+			Name:           state.ClusterName + "-apiserver",
+			Description:    fmt.Sprintf("proxy cce cluster %s apiserver", state.ClusterName),
 		},
 	}
 	resp, err := elbClient.CreateListener(ctx, &input)
@@ -563,6 +547,8 @@ func getStateFromOptions(driverOptions *types.DriverOptions) (state, error) {
 	state.ClusterEIPID = getValueFromDriverOptions(driverOptions, types.StringType, "cluster-eip-id", "clusterEipId").(string)
 	state.AuthMode = getValueFromDriverOptions(driverOptions, types.StringType, "authentiaction-mode", "authentiactionMode").(string)
 	state.APIServerELBID = getValueFromDriverOptions(driverOptions, types.StringType, "api-server-elb-id", "apiServerELBId").(string)
+
+	state.VipSubnetID = getValueFromDriverOptions(driverOptions, types.StringType, "vip-subnet-id", "vipSubnetId").(string)
 
 	eipIDs := getValueFromDriverOptions(driverOptions, types.StringSliceType, "eip-ids", "eipIds").(*types.StringSlice)
 	for _, eipID := range eipIDs.Value {
@@ -792,44 +778,40 @@ func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo 
 	return nodes.Items, nil
 }
 
-func addBackends(ctx context.Context, listenerID string, elbClient *elb.Client, backends []common.NodeInfo) (common.ELBBackendList, error) {
+func addBackends(ctx context.Context, listenerID string, elbClient *elb.Client, backends []common.NodeInfo, state *state) (common.ELBBackendGroupDetails, error) {
 	logrus.Infof("creating backends for listener %s", listenerID)
-	input := common.ELBBackendRequest{}
-	for _, backend := range backends {
-		input = append(input, common.ELBBackendRequestItem{
-			ServerID: backend.Status.ServerID,
-			Address:  backend.Status.PrivateIP,
-		})
+	backendGroupInput := common.ELBBackendGroupRequest{
+		Pool: common.ELBBackendGroup{
+			Protocol:       "TCP",
+			LbAlgorithm:    "ROUND_ROBIN",
+			ListenerID:     listenerID,
+			LoadbalancerID: "",
+		},
 	}
-	list, err := elbClient.AddBackends(ctx, listenerID, input)
-	if err != nil {
-		return nil, err
+	var err error
+	var backendGroup common.ELBBackendGroupDetails
+
+	if backendGroup, err = elbClient.AddBackendGroup(ctx, backendGroupInput); err != nil {
+		return common.ELBBackendGroupDetails{}, err
+	}
+	state.PoolID = backendGroup.Pool.ID
+	for _, backend := range backends {
+		backendInput := common.ELBBackendRequest{
+			Member: common.ELBBackend{
+				Address:      backend.Status.PrivateIP,
+				ProtocolPort: 3389,
+				SubnetID:     state.VipSubnetID,
+			},
+		}
+		if _, err = elbClient.AddBackend(ctx, state.PoolID, backendInput); err != nil {
+			return common.ELBBackendGroupDetails{}, err
+		}
 	}
 	logrus.Info("create backend success")
-	return list, err
+	return backendGroup, err
+
 }
 
-func deleteBackendForELB(ctx context.Context, elbID string, elbClient *elb.Client) error {
-	listeners, err := elbClient.GetListeners(ctx)
-	if err != nil {
-		return err
-	}
-	var toDelete []string
-	for _, l := range *listeners {
-		if l.LoadbalancerID == elbID {
-			toDelete = append(toDelete, l.ID)
-		}
-	}
-	for _, id := range toDelete {
-		backends, err := elbClient.GetBackends(ctx, id)
-		if err != nil {
-			return err
-		}
-		for _, backend := range backends {
-			if err := elbClient.RemoveBackend(ctx, id, backend.ID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+func deleteBackendForELB(ctx context.Context, poolID string, elbClient *elb.Client) error {
+	return elbClient.RemoveBackendGroup(ctx, poolID)
 }

@@ -2,8 +2,8 @@ package elb
 
 import (
 	"context"
+	"errors"
 	"net/http"
-	"time"
 
 	"github.com/cnrancher/huaweicloud-sdk/common"
 )
@@ -24,6 +24,9 @@ func (c *Client) GetLoadBalancers(ctx context.Context) (*common.LoadBalancerList
 }
 
 func (c *Client) GetLoadBalancer(ctx context.Context, id string) (*common.LoadBalancerInfo, error) {
+	if id == "" {
+		return nil, errors.New("loadbalancer id is required")
+	}
 	rtn := common.LoadBalancerInfo{}
 	_, err := c.DoRequest(
 		ctx,
@@ -39,6 +42,9 @@ func (c *Client) GetLoadBalancer(ctx context.Context, id string) (*common.LoadBa
 }
 
 func (c *Client) UpdateLoadBalancer(ctx context.Context, id string, request *common.UpdatableLoadBalancerAttribute) (*common.LoadBalancerInfo, error) {
+	if id == "" {
+		return nil, errors.New("loadbalancer id is required")
+	}
 	rtn := common.LoadBalancerInfo{}
 	_, err := c.DoRequest(
 		ctx,
@@ -54,6 +60,9 @@ func (c *Client) UpdateLoadBalancer(ctx context.Context, id string, request *com
 }
 
 func (c *Client) DeleteLoadBalancer(ctx context.Context, id string) error {
+	if id == "" {
+		return errors.New("loadbalancer id is required")
+	}
 	job := common.LoadBalancerJobInfo{}
 	_, err := c.DoRequest(
 		ctx,
@@ -70,21 +79,16 @@ func (c *Client) DeleteLoadBalancer(ctx context.Context, id string) error {
 }
 
 func (c *Client) CreateLoadBalancer(ctx context.Context, request *common.LoadBalancerRequest) (*common.LoadBalancerInfo, error) {
-	job := common.LoadBalancerJobInfo{}
+	lbInfo := common.LoadBalancerInfo{}
 	_, err := c.DoRequest(
 		ctx,
 		http.MethodPost,
 		c.GetURL("loadbalancers"),
 		request,
-		&job,
+		&lbInfo,
 	)
 	if err != nil {
 		return nil, err
 	}
-	_, info, err := c.WaitForELBJob(ctx, 30*time.Second, 5*time.Minute, job.JobID)
-	if err != nil {
-		return nil, err
-	}
-	id := (info.Entities["elb"].(map[string]interface{}))["id"].(string)
-	return c.GetLoadBalancer(ctx, id)
+	return c.GetLoadBalancer(ctx, lbInfo.Loadbalancer.ID)
 }

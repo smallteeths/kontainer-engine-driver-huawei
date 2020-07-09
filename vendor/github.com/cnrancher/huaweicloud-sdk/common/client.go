@@ -107,17 +107,15 @@ func (c *Client) DoRequest(ctx context.Context, method, url string, input, outpu
 	// }
 
 	if !requestOK {
-		logrus.Debugf("response raw data: %s", string(byteData))
+		logrus.Debugf("response status code %d, raw data: %s", resp.StatusCode, string(byteData))
 		einfo := ErrorInfo{}
-		if err = json.Unmarshal(byteData, &einfo); err != nil {
+		errorInfo := OddErrorInfo{}
+		if err = json.Unmarshal(byteData, &errorInfo); err != nil {
 			return nil, errors.Wrap(err, "error when unmarshaling error info of huawei api")
 		}
 		einfo.StatusCode = resp.StatusCode
-		//to error v1
-		if einfo.ErrorV1 != nil {
-			einfo.Description = einfo.ErrorV1["message"].(string)
-			einfo.Code = einfo.ErrorV1["code"].(string)
-		}
+		einfo.Code = errorInfo.ErrorCodeInner
+		einfo.Description = errorInfo.Reason
 		return nil, &einfo
 	}
 
@@ -197,6 +195,18 @@ func WaitForDeleteComplete(ctx context.Context, getResourceFunc func(context.Con
 			}
 		}
 		return errors.New("delete not complete")
+	})
+}
+
+func WaitForDeleteCompleteWithTimeout(ctx context.Context, during, timeout time.Duration, getResourceFunc func(context.Context) error) error {
+	return waitForCompleteUntilTrue(ctx, during, timeout, func(ictx context.Context) (bool, error) {
+		if err := getResourceFunc(ictx); err != nil {
+			eInfo, ok := err.(*ErrorInfo)
+			if ok && eInfo.StatusCode == 404 {
+				return true, nil
+			}
+		}
+		return false, errors.New("delete not complete")
 	})
 }
 

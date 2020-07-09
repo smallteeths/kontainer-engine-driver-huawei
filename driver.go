@@ -43,6 +43,7 @@ type state struct {
 	ContainerNetworkCidr  string
 	VpcID                 string
 	SubnetID              string
+	VipSubnetID           string
 	HighwaySubnet         string
 	AuthenticatingProxyCa string
 	ClusterID             string
@@ -52,6 +53,7 @@ type state struct {
 	NodeConfig            *common.NodeConfig
 	AuthMode              string
 	APIServerELBID        string
+	PoolID                string
 
 	ClusterInfo types.ClusterInfo
 }
@@ -130,7 +132,7 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 			if elbInfo, err = createELB(ctx, elbClient, eipInfo, &state); err != nil {
 				return nil, err
 			}
-
+			state.APIServerELBID = elbInfo.Loadbalancer.ID
 		} else {
 			elbInfo, err = elbClient.GetLoadBalancer(ctx, state.APIServerELBID)
 			if err != nil {
@@ -141,8 +143,8 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 		if err != nil {
 			return nil, err
 		}
-		for _, listener := range *listeners {
-			if listener.LoadbalancerID == elbInfo.ID && listener.Port == 5443 {
+		for _, listener := range (*listeners).Listeners {
+			if listener.Listener.LoadbalancerID == elbInfo.Loadbalancer.ID && listener.Listener.Port == 5443 {
 				listenerInfo = &listener
 				break
 			}
@@ -169,15 +171,16 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 		if err != nil {
 			return nil, err
 		}
-
-		if _, err := addBackends(ctx, listenerInfo.ID, elbClient, addresses); err != nil {
+		if _, err := addBackends(ctx, listenerInfo.Listener.ID, elbClient, addresses, &state); err != nil {
 			return nil, err
 		}
-
-		clusterinfo.Endpoint = fmt.Sprintf("https://%s:5443", elbInfo.VIPAddress)
+		// clusterinfo.Endpoint = fmt.Sprintf("https://%s:5443", elbInfo.Loadbalancer.VIPAddress)
 	}
 
-	storeState(&clusterinfo, state)
+	err = storeState(&clusterinfo, state)
+	if err != nil {
+		return nil, err
+	}
 	return &clusterinfo, nil
 }
 
@@ -220,7 +223,7 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 	}
 	baseClient := getHuaweiBaseClient(state)
 	cceClient := cce.NewClient(baseClient)
-	elbClient := elb.NewClient(baseClient)
+
 	cluster, err := cceClient.GetCluster(ctx, state.ClusterID)
 	if err != nil {
 		return nil, err
@@ -252,15 +255,10 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 		}
 	}
 
-	if state.ExternalServerEnabled {
-		lb, err := elbClient.GetLoadBalancer(ctx, state.APIServerELBID)
-		if err != nil {
-			return nil, err
-		}
-		clusterInfo.Endpoint = fmt.Sprintf("https://%s:5443", lb.VIPAddress)
-	} else {
-		clusterInfo.Endpoint = internalServer
-	}
+	// The "internalServer" is internal api-server url.
+	// You can only access internal api-server url with the CA cert.
+	// The CA cert only signed for internal api-server url and can't be updated through api
+	clusterInfo.Endpoint = internalServer
 
 	clusterInfo.Status = cluster.Status.Phase
 	clusterInfo.ClientKey = cert.Users[0].User.ClientKeyData
@@ -296,7 +294,7 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 	logrus.Info("post-check completed successfully")
 	logrus.Debugf("info: %v", *clusterInfo)
 
-	return clusterInfo, nil
+	return clusterInfo, storeState(clusterInfo, state)
 }
 
 // Remove removes the cluster
@@ -305,7 +303,7 @@ func (d *CCEDriver) Remove(ctx context.Context, clusterInfo *types.ClusterInfo) 
 	if err != nil {
 		return err
 	}
-	deleteResources(ctx, state, []string{"elb", "cluster"})
+	deleteResources(ctx, state, []string{"elb", "cluster", "eip"})
 	return nil
 }
 
@@ -474,12 +472,60 @@ func deleteResources(ctx context.Context, state state, sources []string) {
 			}
 		case source == "elb" && state.APIServerELBID != "":
 			logrus.Infof("cleaning up elb %s", state.APIServerELBID)
-			if err := deleteBackendForELB(ctx, state.APIServerELBID, elbClient); err == nil {
-				logrus.WithError(err).Warnf("error clean up the backend for elb %s", state.APIServerELBID)
-				continue
+			// Query ELB listeners
+			lbInfo, _ := elbClient.GetLoadBalancer(ctx, state.APIServerELBID)
+			listenerIDList := lbInfo.Loadbalancer.Listeners
+			// Release ELB listeners
+			emptyListenerBody := map[string]interface{}{
+				"listener": map[string]interface{}{
+					"default_pool_id": nil,
+				},
 			}
+			for _, listenerIDObj := range listenerIDList {
+				if _, err := elbClient.UpdateListener(ctx, listenerIDObj.ID, emptyListenerBody); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(update listener:%s)", state.ClusterID, listenerIDObj.ID)
+				}
+			}
+			// Delete ELB listeners
+			for _, listenerIDObj := range listenerIDList {
+				if err := elbClient.DeleteListener(ctx, listenerIDObj.ID); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(delete listener:%s)", state.ClusterID, listenerIDObj.ID)
+				}
+			}
+			// Query Pools
+			poolIDList := lbInfo.Loadbalancer.Pools
+			for _, poolIDObj := range poolIDList {
+				pool, _ := elbClient.GetBackendGroup(ctx, poolIDObj.ID)
+				hlID := pool.Pool.HealthmonitorID
+				// Delete HealthMonitor
+				if err := elbClient.DeleteHealthcheck(ctx, hlID); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(healthmonitor:%s)", state.ClusterID, hlID)
+				}
+				poolID := pool.Pool.ID
+				members := pool.Pool.Members
+				// Delete Members
+				for _, memberIDObj := range members {
+					if err := elbClient.RemoveBackend(ctx, poolID, memberIDObj.ID); err != nil {
+						logrus.WithError(err).Warnf("error cleaning up cluster %s(backend:%s-%s)", state.ClusterID, poolID, memberIDObj.ID)
+					}
+				}
+			}
+			// Delete Pools
+			for _, poolIDObj := range poolIDList {
+				if err := elbClient.RemoveBackendGroup(ctx, poolIDObj.ID); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(backendgroup:%s)", state.ClusterID, poolIDObj.ID)
+				}
+			}
+			// Delete ELB
 			if err := elbClient.DeleteLoadBalancer(ctx, state.APIServerELBID); err != nil {
-				logrus.WithError(err).Warnf("error cleaning up elb %s", state.APIServerELBID)
+				logrus.WithError(err).Warnf("error cleaning up cluster %s(elb:%s)", state.ClusterID, state.APIServerELBID)
+			}
+		case source == "eip" && state.ClusterEIPID != "":
+			info := common.EipAssocArg{
+				Port: common.PortDesc{},
+			}
+			if _, err := networkClient.UpdateEIP(ctx, state.ClusterEIPID, &info); err != nil {
+				continue
 			}
 		}
 	}

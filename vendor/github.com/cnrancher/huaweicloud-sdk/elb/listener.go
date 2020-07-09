@@ -2,6 +2,7 @@ package elb
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/cnrancher/huaweicloud-sdk/common"
@@ -37,7 +38,25 @@ func (c *Client) GetListeners(ctx context.Context) (*common.ELBListenerList, err
 	return &rtn, nil
 }
 
+func (c *Client) GetListenersByELBID(ctx context.Context, loadBalancerId string) (*common.ELBListenerList, error) {
+	rtn := common.ELBListenerList{}
+	_, err := c.DoRequest(
+		ctx,
+		http.MethodGet,
+		c.GetURL("listeners?loadBalancerId="+loadBalancerId),
+		nil,
+		&rtn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &rtn, nil
+}
+
 func (c *Client) GetListener(ctx context.Context, id string) (*common.ELBListenerInfo, error) {
+	if id == "" {
+		return nil, errors.New("[GetListener]listener id is required")
+	}
 	rtn := common.ELBListenerInfo{}
 	_, err := c.DoRequest(
 		ctx,
@@ -52,7 +71,10 @@ func (c *Client) GetListener(ctx context.Context, id string) (*common.ELBListene
 	return &rtn, nil
 }
 
-func (c *Client) UpdateListener(ctx context.Context, id string, request *common.UpdatableELBListenerAttribute) (*common.ELBListenerInfo, error) {
+func (c *Client) UpdateListener(ctx context.Context, id string, request interface{}) (*common.ELBListenerInfo, error) {
+	if id == "" {
+		return nil, errors.New("[UpdateListener]listener id is required")
+	}
 	rtn := common.ELBListenerInfo{}
 	_, err := c.DoRequest(
 		ctx,
@@ -68,10 +90,13 @@ func (c *Client) UpdateListener(ctx context.Context, id string, request *common.
 }
 
 func (c *Client) DeleteListener(ctx context.Context, id string) error {
+	if id == "" {
+		return errors.New("[DeleteListener]listener id is required")
+	}
 	_, err := c.DoRequest(
 		ctx,
 		http.MethodDelete,
-		c.GetURL("listeners"),
+		c.GetURL("listeners", id),
 		nil,
 		nil,
 	)
