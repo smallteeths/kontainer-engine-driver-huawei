@@ -1,36 +1,51 @@
 ---
-pipeline:
-  build:
+kind: pipeline
+
+steps:
+  - name: build
     privileged: true
     image: rancher/dapper:1.11.2
     volumes:
-    - /var/run/docker.sock:/var/run/docker.sock
+      - name: docker
+        path: /var/run/docker.sock
     commands:
-    - dapper ci
+      - dapper ci
 
-  github-binary-publish-release:
+  - name: github-binary-publish-release
     image: plugins/github-release
-    files:
-    - bin/kontainer-engine-driver-huawei-*
-    checksum:
-    - sha256
-    secrets: [github_token]
+    settings:
+      api_key:
+        from_secret: github_token
+      checksum:
+        - sha256
+      files:
+        - "bin/kontainer-engine-driver-huawei-*"
     when:
       branch: master
       event: tag
       ref:
         exclude: [ refs/tags/*rc* ]
 
-  github-binary-publish-prerelease:
+  - name: github-binary-publish-prerelease
     image: plugins/github-release
-    prerelease: true
-    files:
-    - bin/kontainer-engine-driver-huawei-*
-    checksum:
-    - sha256
-    secrets: [github_token]
+    settings:
+      api_key:
+        from_secret: github_token
+      checksum:
+        - sha256
+      files:
+        - "bin/kontainer-engine-driver-huawei-*"
+      prerelease: true
     when:
       branch: master
       event: tag
       ref:
         include: [ refs/tags/*rc* ]
+
+volumes:
+  - name: docker
+    host:
+      path: /var/run/docker.sock
+
+node:
+  instance: agent-amd64
