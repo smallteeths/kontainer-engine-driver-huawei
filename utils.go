@@ -14,7 +14,7 @@ import (
 	"github.com/cnrancher/huaweicloud-sdk/elb"
 	"github.com/cnrancher/huaweicloud-sdk/network"
 	"github.com/pkg/errors"
-	"github.com/rancher/kontainer-engine/types"
+	"github.com/rancher/rancher/pkg/kontainer-engine/types"
 	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
@@ -35,13 +35,14 @@ var configTemplate, _ = template.New("nginx-template").Parse(nginxConfigTemplate
 
 // GenerateServiceAccountToken generate a serviceAccountToken for clusterAdmin given a rest clientset
 func GenerateServiceAccountToken(clientset kubernetes.Interface) (string, error) {
+	ctx := context.Background()
 	serviceAccount := &v1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: netesDefault,
 		},
 	}
 
-	_, err := clientset.CoreV1().ServiceAccounts(defaultNamespace).Create(serviceAccount)
+	_, err := clientset.CoreV1().ServiceAccounts(defaultNamespace).Create(ctx, serviceAccount, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", fmt.Errorf("error creating service account: %v", err)
 	}
@@ -62,9 +63,9 @@ func GenerateServiceAccountToken(clientset kubernetes.Interface) (string, error)
 			},
 		},
 	}
-	clusterAdminRole, err := clientset.RbacV1beta1().ClusterRoles().Get(clusterAdmin, metav1.GetOptions{})
+	clusterAdminRole, err := clientset.RbacV1beta1().ClusterRoles().Get(ctx, clusterAdmin, metav1.GetOptions{})
 	if err != nil {
-		clusterAdminRole, err = clientset.RbacV1beta1().ClusterRoles().Create(adminRole)
+		clusterAdminRole, err = clientset.RbacV1beta1().ClusterRoles().Create(ctx, adminRole, metav1.CreateOptions{})
 		if err != nil {
 			return "", fmt.Errorf("error creating admin role: %v", err)
 		}
@@ -88,20 +89,20 @@ func GenerateServiceAccountToken(clientset kubernetes.Interface) (string, error)
 			APIGroup: v1beta1.GroupName,
 		},
 	}
-	if _, err = clientset.RbacV1beta1().ClusterRoleBindings().Create(clusterRoleBinding); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err = clientset.RbacV1beta1().ClusterRoleBindings().Create(ctx, clusterRoleBinding, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return "", fmt.Errorf("error creating role bindings: %v", err)
 	}
 
 	start := time.Millisecond * 250
 	for i := 0; i < 5; i++ {
 		time.Sleep(start)
-		if serviceAccount, err = clientset.CoreV1().ServiceAccounts(defaultNamespace).Get(serviceAccount.Name, metav1.GetOptions{}); err != nil {
+		if serviceAccount, err = clientset.CoreV1().ServiceAccounts(defaultNamespace).Get(ctx, serviceAccount.Name, metav1.GetOptions{}); err != nil {
 			return "", fmt.Errorf("error getting service account: %v", err)
 		}
 
 		if len(serviceAccount.Secrets) > 0 {
 			secret := serviceAccount.Secrets[0]
-			secretObj, err := clientset.CoreV1().Secrets(defaultNamespace).Get(secret.Name, metav1.GetOptions{})
+			secretObj, err := clientset.CoreV1().Secrets(defaultNamespace).Get(ctx, secret.Name, metav1.GetOptions{})
 			if err != nil {
 				return "", fmt.Errorf("error getting secret: %v", err)
 			}
@@ -640,18 +641,18 @@ func getNodeRequirement(state state, count int64) *common.NodeInfo {
 	return nodeconf
 }
 
-func createDefaultNamespace(client *cce.K8sClient) error {
-	if _, err := client.CoreV1Client.Namespaces().Create(&v1.Namespace{
+func createDefaultNamespace(ctx context.Context, client *cce.K8sClient) error {
+	if _, err := client.CoreV1Client.Namespaces().Create(ctx, &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: defaultNamespace,
 		},
-	}); err != nil && !apierrors.IsAlreadyExists(err) {
+	}, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
 	return nil
 }
 
-func createNginxConfig(client *cce.K8sClient, apiserver string) (*v1.ConfigMap, error) {
+func createNginxConfig(ctx context.Context, client *cce.K8sClient, apiserver string) (*v1.ConfigMap, error) {
 	logrus.Info("creating nginx config for cluster apiserver proxy..")
 	entry := nginxConfig{
 		APIServerHost: apiserver,
@@ -669,14 +670,14 @@ func createNginxConfig(client *cce.K8sClient, apiserver string) (*v1.ConfigMap, 
 			"nginx.conf": configBuf.String(),
 		},
 	}
-	if _, err := client.CoreV1Client.ConfigMaps(defaultNamespace).Create(&rtn); err != nil {
+	if _, err := client.CoreV1Client.ConfigMaps(defaultNamespace).Create(ctx, &rtn, metav1.CreateOptions{}); err != nil {
 		return nil, err
 	}
 	logrus.Infof("create nginx proxy config[%s/%s] success", rtn.Namespace, rtn.Name)
 	return &rtn, nil
 }
 
-func createNginxDaemonSet(client *cce.K8sClient, config *v1.ConfigMap) error {
+func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1.ConfigMap) error {
 	logrus.Info("creating nginx proxy daemon set...")
 	labels := map[string]string{
 		"app": "apiserver-proxy",
@@ -734,7 +735,7 @@ func createNginxDaemonSet(client *cce.K8sClient, config *v1.ConfigMap) error {
 			},
 		},
 	}
-	if _, err := client.AppsV1Client.DaemonSets(defaultNamespace).Create(&daemonSet); err != nil {
+	if _, err := client.AppsV1Client.DaemonSets(defaultNamespace).Create(ctx, &daemonSet, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 	logrus.Info("create nginx proxy daemon set success")
@@ -747,7 +748,7 @@ func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo 
 		return nil, err
 	}
 
-	if err := createDefaultNamespace(k8sClient); err != nil {
+	if err := createDefaultNamespace(ctx, k8sClient); err != nil {
 		return nil, err
 	}
 
@@ -762,11 +763,11 @@ func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo 
 			address = u.Host
 		}
 	}
-	if config, err = createNginxConfig(k8sClient, address); err != nil {
+	if config, err = createNginxConfig(ctx, k8sClient, address); err != nil {
 		return nil, err
 	}
 
-	if err := createNginxDaemonSet(k8sClient, config); err != nil {
+	if err := createNginxDaemonSet(ctx, k8sClient, config); err != nil {
 		return nil, err
 	}
 

@@ -13,8 +13,8 @@ import (
 	"github.com/cnrancher/huaweicloud-sdk/elb"
 	"github.com/cnrancher/huaweicloud-sdk/network"
 	"github.com/pkg/errors"
-	"github.com/rancher/kontainer-engine/drivers/util"
-	"github.com/rancher/kontainer-engine/types"
+	"github.com/rancher/rancher/pkg/kontainer-engine/drivers/util"
+	"github.com/rancher/rancher/pkg/kontainer-engine/types"
 	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -60,6 +60,18 @@ type state struct {
 
 type CCEDriver struct {
 	driverCapabilities types.Capabilities
+}
+
+func (d *CCEDriver) ETCDSave(ctx context.Context, clusterInfo *types.ClusterInfo, opts *types.DriverOptions, snapshotName string) error {
+	return fmt.Errorf("ETCD backup operations are not implemented")
+}
+
+func (d *CCEDriver) ETCDRestore(ctx context.Context, clusterInfo *types.ClusterInfo, opts *types.DriverOptions, snapshotName string) (*types.ClusterInfo, error) {
+	return nil, fmt.Errorf("ETCD backup operations are not implemented")
+}
+
+func (d *CCEDriver) ETCDRemoveSnapshot(ctx context.Context, clusterInfo *types.ClusterInfo, opts *types.DriverOptions, snapshotName string) error {
+	return fmt.Errorf("ETCD backup operations are not implemented")
 }
 
 // GetDriverCreateOptions returns cli flags that are used in create
@@ -613,14 +625,6 @@ func (d *CCEDriver) RemoveLegacyServiceAccount(ctx context.Context, clusterInfo 
 	}
 
 	return util.DeleteLegacyServiceAccountAndRoleBinding(clientSet)
-}
-
-func (d *CCEDriver) ETCDSave(ctx context.Context, clusterInfo *types.ClusterInfo, opts *types.DriverOptions, snapshotName string) error {
-	return fmt.Errorf("ETCD backup operations are not implemented")
-}
-
-func (d *CCEDriver) ETCDRestore(ctx context.Context, clusterInfo *types.ClusterInfo, opts *types.DriverOptions, snapshotName string) error {
-	return fmt.Errorf("ETCD backup operations are not implemented")
 }
 
 func getClientSet(ctx context.Context, clusterInfo *types.ClusterInfo) (*kubernetes.Clientset, error) {
