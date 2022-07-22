@@ -1,4 +1,4 @@
-package main
+package driver
 
 import (
 	"context"
@@ -8,11 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cnrancher/huaweicloud-sdk/cce"
-	"github.com/cnrancher/huaweicloud-sdk/common"
-	"github.com/cnrancher/huaweicloud-sdk/elb"
-	"github.com/cnrancher/huaweicloud-sdk/network"
+	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/cce/v3/model"
+	elb_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model"
 	"github.com/pkg/errors"
+	"github.com/rancher/kontainer-engine-driver-huawei/cce"
+	"github.com/rancher/kontainer-engine-driver-huawei/common"
+	"github.com/rancher/kontainer-engine-driver-huawei/elb"
+	"github.com/rancher/kontainer-engine-driver-huawei/network"
 	"github.com/rancher/rancher/pkg/kontainer-engine/drivers/util"
 	"github.com/rancher/rancher/pkg/kontainer-engine/types"
 	"github.com/sirupsen/logrus"
@@ -25,38 +27,6 @@ const (
 	pollInterval     = 30
 	defaultNamespace = "cattle-system"
 )
-
-type state struct {
-	AccessKey             string
-	SecretKey             string
-	ClusterName           string
-	DisplayName           string
-	Description           string
-	ProjectID             string
-	Region                string
-	ClusterType           string
-	ClusterFlavor         string
-	ClusterVersion        string
-	ClusterBillingMode    int64
-	ClusterLabels         map[string]string
-	ContainerNetworkMode  string
-	ContainerNetworkCidr  string
-	VpcID                 string
-	SubnetID              string
-	VipSubnetID           string
-	HighwaySubnet         string
-	AuthenticatingProxyCa string
-	ClusterID             string
-	ExternalServerEnabled bool
-	ClusterEIPID          string
-	ClusterJobID          string
-	NodeConfig            *common.NodeConfig
-	AuthMode              string
-	APIServerELBID        string
-	PoolID                string
-
-	ClusterInfo types.ClusterInfo
-}
 
 type CCEDriver struct {
 	driverCapabilities types.Capabilities
@@ -105,14 +75,14 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 		return nil, fmt.Errorf("error parsing state: %v", err)
 	}
 	baseClient := getHuaweiBaseClient(state)
-	cceClient := cce.NewClient(baseClient)
-	networkClient := network.NewClient(baseClient)
-	elbClient := elb.NewClient(baseClient)
+	cceClient := cce.GetCCEServiceClient(baseClient)
+	networkClient := network.NewNetWorkClient(baseClient)
+	elbClient := elb.NewElbClient(baseClient)
+	eipClient := network.NewEipClient(baseClient)
 	cleanUpResources := []string{}
 	clusterinfo := types.ClusterInfo{}
-	var eipInfo *common.EipInfo
-	var elbInfo *common.LoadBalancerInfo
-	var listenerInfo *common.ELBListenerInfo
+	var elbInfo *elb_model.CreateLoadBalancerResponse
+	var listenerInfo *elb_model.Listener
 	//resource cleanup defer
 	defer func() {
 		if rtnerr != nil && len(cleanUpResources) != 0 {
@@ -122,68 +92,73 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 
 	if state.VpcID == "" {
 		cleanUpResources = append(cleanUpResources, "vpc")
-		if _, err := createVPC(ctx, networkClient, &state); err != nil {
+		if _, err := network.CreateVPC(ctx, networkClient, &state); err != nil {
 			return nil, err
 		}
 	}
 	if state.SubnetID == "" {
 		cleanUpResources = append(cleanUpResources, "subnet")
-		if _, err := createSubnet(ctx, networkClient, &state); err != nil {
+		if _, err := network.CreateSubnet(ctx, networkClient, &state); err != nil {
 			return nil, err
 		}
 	}
 
 	if state.ExternalServerEnabled {
 		if state.ClusterEIPID != "" {
-			if eipInfo, err = networkClient.GetEIP(ctx, state.ClusterEIPID); err != nil {
+			if _, err = network.ShowPublicip(eipClient, state.ClusterEIPID); err != nil {
 				return nil, err
 			}
 		}
 		if state.APIServerELBID == "" {
 			cleanUpResources = append(cleanUpResources, "elb")
-			if elbInfo, err = createELB(ctx, elbClient, eipInfo, &state); err != nil {
+			if elbInfo, err = elb.CreateELB(elbClient, &state); err != nil {
 				return nil, err
 			}
-			state.APIServerELBID = elbInfo.Loadbalancer.ID
+			state.APIServerELBID = *elbInfo.LoadbalancerId
 		} else {
-			elbInfo, err = elbClient.GetLoadBalancer(ctx, state.APIServerELBID)
-			if err != nil {
+			if _, err = elb.GetLoadBalancer(elbClient, state.APIServerELBID); err != nil {
 				return nil, err
 			}
 		}
-		listeners, err := elbClient.GetListeners(ctx)
+		listeners, err := elb.ListListeners(elbClient)
 		if err != nil {
 			return nil, err
 		}
-		for _, listener := range (*listeners).Listeners {
-			if listener.Listener.LoadbalancerID == elbInfo.Loadbalancer.ID && listener.Listener.Port == 5443 {
+		for _, listener := range *listeners.Listeners {
+			hasLoadbalancerID := false
+			for _, loadbalancer := range listener.Loadbalancers {
+				if *loadbalancer.Id == *elbInfo.LoadbalancerId {
+					hasLoadbalancerID = true
+				}
+			}
+			if hasLoadbalancerID && listener.ProtocolPort == 5443 {
 				listenerInfo = &listener
 				break
 			}
 		}
 		if listenerInfo == nil {
-			if listenerInfo, err = createListener(ctx, elbClient, &state); err != nil {
+			if listenerInfo, err = elb.CreateListener(elbClient, &state); err != nil {
 				return nil, err
 			}
 		}
 	}
 
-	var cceClusterInfo *common.ClusterInfo
+	var cceClusterInfo *model.ShowClusterResponse
 	cleanUpResources = append(cleanUpResources, "cluster")
-	if cceClusterInfo, err = createCluster(ctx, cceClient, &state); err != nil {
+	if cceClusterInfo, err = cce.CreateCluster(ctx, cceClient, &state); err != nil {
 		return nil, err
 	}
 
-	if err := createNodes(ctx, cceClient, &state); err != nil {
+	if _, err := cce.CreateNodes(ctx, *cceClusterInfo.Metadata.Uid, cceClient, &state, int32(state.NodeConfig.NodeCount)); err != nil {
 		return nil, err
 	}
 
 	if state.ExternalServerEnabled {
-		addresses, err := createProxyDaemonSets(ctx, cceClient, cceClusterInfo, &state)
+		addresses, err := createProxyDaemonSets(ctx, cceClient, cceClusterInfo)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := addBackends(ctx, listenerInfo.Listener.ID, elbClient, addresses, &state); err != nil {
+		if _, err := elb.AddBackends(listenerInfo.Id, elbClient, addresses, &state); err != nil {
 			return nil, err
 		}
 		// clusterinfo.Endpoint = fmt.Sprintf("https://%s:5443", elbInfo.Loadbalancer.VIPAddress)
@@ -234,9 +209,9 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 		return nil, err
 	}
 	baseClient := getHuaweiBaseClient(state)
-	cceClient := cce.NewClient(baseClient)
+	cceClient := cce.GetCCEServiceClient(baseClient)
 
-	cluster, err := cceClient.GetCluster(ctx, state.ClusterID)
+	cluster, err := cce.ShowCluster(cceClient, state.ClusterID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +220,7 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 		logrus.Debugf("cluster info %s", string(jsondata))
 	}
 
-	cert, err := cceClient.GetClusterCert(ctx, state.ClusterID)
+	cert, err := cce.GetClusterCert(cluster, cceClient)
 	if err != nil {
 		return nil, err
 	}
@@ -259,11 +234,11 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 
 	var internalServer string
 
-	for _, cluster := range cert.Clusters {
-		switch cluster.Name {
+	for _, cluster := range *cert.Clusters {
+		switch *cluster.Name {
 		case "internalCluster":
-			internalServer = cluster.Cluster.Server
-			clusterInfo.RootCaCertificate = cluster.Cluster.CertificateAuthorityData
+			internalServer = *cluster.Cluster.Server
+			clusterInfo.RootCaCertificate = *cluster.Cluster.CertificateAuthorityData
 		}
 	}
 
@@ -271,11 +246,14 @@ func (d *CCEDriver) PostCheck(ctx context.Context, clusterInfo *types.ClusterInf
 	// You can only access internal api-server url with the CA cert.
 	// The CA cert only signed for internal api-server url and can't be updated through api
 	clusterInfo.Endpoint = internalServer
-
-	clusterInfo.Status = cluster.Status.Phase
-	clusterInfo.ClientKey = cert.Users[0].User.ClientKeyData
-	clusterInfo.ClientCertificate = cert.Users[0].User.ClientCertificateData
-	clusterInfo.Username = cert.Users[0].Name
+	users := *cert.Users
+	clientKey := users[0].User.ClientKeyData
+	clientCertificate := users[0].User.ClientCertificateData
+	name := users[0].Name
+	clusterInfo.Status = *cluster.Status.Phase
+	clusterInfo.ClientKey = *clientKey
+	clusterInfo.ClientCertificate = *clientCertificate
+	clusterInfo.Username = *name
 
 	clientset, err := getClientSet(ctx, clusterInfo)
 	if err != nil {
@@ -389,42 +367,6 @@ func getValueFromDriverOptions(driverOptions *types.DriverOptions, optionType st
 	return nil
 }
 
-func (state *state) validate() error {
-	if state.ClusterName == "" {
-		return fmt.Errorf("cluster name is required")
-	}
-
-	if state.AccessKey == "" {
-		return fmt.Errorf("access key is required")
-	}
-
-	if state.SecretKey == "" {
-		return fmt.Errorf("secret key is required")
-	}
-
-	if state.ProjectID == "" {
-		return fmt.Errorf("project id is required")
-	}
-
-	if state.ClusterType == "" {
-		return fmt.Errorf("cluster type is required")
-	}
-
-	if state.ClusterFlavor == "" {
-		return fmt.Errorf("cluster flavor is required")
-	}
-
-	if state.ClusterVersion == "" {
-		return fmt.Errorf("cluster version is required")
-	}
-
-	if state.NodeConfig.NodeCount <= 0 {
-		return errors.New("cluster node count must be more than 0")
-	}
-
-	return nil
-}
-
 func NewDriver() types.Driver {
 	driver := &CCEDriver{
 		driverCapabilities: types.Capabilities{
@@ -439,8 +381,8 @@ func NewDriver() types.Driver {
 	return driver
 }
 
-func getState(info *types.ClusterInfo) (state, error) {
-	state := state{}
+func getState(info *types.ClusterInfo) (common.State, error) {
+	state := common.State{}
 
 	err := json.Unmarshal([]byte(info.Metadata["state"]), &state)
 	if err != nil {
@@ -450,133 +392,93 @@ func getState(info *types.ClusterInfo) (state, error) {
 	return state, err
 }
 
-func getHuaweiBaseClient(s state) *common.Client {
+func getHuaweiBaseClient(s common.State) *common.Client {
 	return common.NewClient(
 		s.AccessKey,
 		s.SecretKey,
-		common.DefaultAPIEndpoint,
 		s.Region,
 		s.ProjectID,
 	)
 }
 
-func deleteResources(ctx context.Context, state state, sources []string) {
+func deleteResources(ctx context.Context, state common.State, sources []string) {
 	baseClient := getHuaweiBaseClient(state)
-	networkClient := network.NewClient(baseClient)
-	cceClient := cce.NewClient(baseClient)
-	elbClient := elb.NewClient(baseClient)
+	networkClient := network.NewNetWorkClient(baseClient)
+	networkClientV2 := network.NewEipV2Client(baseClient)
+	cceClient := cce.GetCCEServiceClient(baseClient)
+	elbClient := elb.NewElbClient(baseClient)
 	for _, source := range sources {
 		switch {
 		case source == "vpc" && state.VpcID != "":
 			logrus.Infof("cleaning up vpc %s", state.VpcID)
-			if err := networkClient.DeleteVPC(ctx, state.VpcID); err != nil {
+			if _, err := network.DeleteVPC(networkClient, state.VpcID); err != nil {
 				logrus.WithError(err).Warn("error cleaning up vpc")
 			}
-		case source == "subnet" && state.SubnetID != "":
+		case source == "subnet" && state.SubnetID != "" && state.VpcID != "":
 			logrus.Infof("cleaning up subnet %s", state.SubnetID)
-			if err := networkClient.DeleteSubnet(ctx, state.SubnetID); err != nil {
+			if _, err := network.DeleteSubnet(networkClient, state.VpcID, state.SubnetID); err != nil {
 				logrus.WithError(err).Warnf("error cleaning up subnet %s", state.SubnetID)
 			}
 		case source == "cluster" && state.ClusterID != "":
 			logrus.Infof("cleaning up cluster %s", state.ClusterID)
-			if err := cceClient.DeleteCluster(ctx, state.ClusterID); err != nil {
+
+			if _, err := cce.DeleteCluster(cceClient, state.ClusterID); err != nil {
 				logrus.WithError(err).Warnf("error cleaning up cluster %s", state.ClusterID)
 			}
 		case source == "elb" && state.APIServerELBID != "":
 			logrus.Infof("cleaning up elb %s", state.APIServerELBID)
 			// Query ELB listeners
-			lbInfo, _ := elbClient.GetLoadBalancer(ctx, state.APIServerELBID)
+			lbInfo, _ := elb.GetLoadBalancer(elbClient, state.APIServerELBID)
 			listenerIDList := lbInfo.Loadbalancer.Listeners
 			// Release ELB listeners
-			emptyListenerBody := map[string]interface{}{
-				"listener": map[string]interface{}{
-					"default_pool_id": nil,
-				},
-			}
 			for _, listenerIDObj := range listenerIDList {
-				if _, err := elbClient.UpdateListener(ctx, listenerIDObj.ID, emptyListenerBody); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(update listener:%s)", state.ClusterID, listenerIDObj.ID)
+				if _, err := elb.UpdateListener(elbClient, listenerIDObj.Id); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(update listener:%s)", state.ClusterID, listenerIDObj.Id)
 				}
 			}
 			// Delete ELB listeners
 			for _, listenerIDObj := range listenerIDList {
-				if err := elbClient.DeleteListener(ctx, listenerIDObj.ID); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(delete listener:%s)", state.ClusterID, listenerIDObj.ID)
+				if _, err := elb.DeleteListener(elbClient, listenerIDObj.Id); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(delete listener:%s)", state.ClusterID, listenerIDObj.Id)
 				}
 			}
 			// Query Pools
 			poolIDList := lbInfo.Loadbalancer.Pools
 			for _, poolIDObj := range poolIDList {
-				pool, _ := elbClient.GetBackendGroup(ctx, poolIDObj.ID)
-				hlID := pool.Pool.HealthmonitorID
+				pool, _ := elb.ShowPool(elbClient, poolIDObj.Id)
+				hlID := pool.Pool.HealthmonitorId
 				// Delete HealthMonitor
-				if err := elbClient.DeleteHealthcheck(ctx, hlID); err != nil {
+				if _, err := elb.DeleteHealthcheck(elbClient, hlID); err != nil {
 					logrus.WithError(err).Warnf("error cleaning up cluster %s(healthmonitor:%s)", state.ClusterID, hlID)
 				}
-				poolID := pool.Pool.ID
+				poolID := pool.Pool.Id
 				members := pool.Pool.Members
 				// Delete Members
 				for _, memberIDObj := range members {
-					if err := elbClient.RemoveBackend(ctx, poolID, memberIDObj.ID); err != nil {
-						logrus.WithError(err).Warnf("error cleaning up cluster %s(backend:%s-%s)", state.ClusterID, poolID, memberIDObj.ID)
+					if _, err := elb.DeleteMember(elbClient, poolID, memberIDObj.Id); err != nil {
+						logrus.WithError(err).Warnf("error cleaning up cluster %s(backend:%s-%s)", state.ClusterID, poolID, memberIDObj.Id)
 					}
 				}
 			}
 			// Delete Pools
 			for _, poolIDObj := range poolIDList {
-				if err := elbClient.RemoveBackendGroup(ctx, poolIDObj.ID); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(backendgroup:%s)", state.ClusterID, poolIDObj.ID)
+				if _, err := elb.DeletePool(elbClient, poolIDObj.Id); err != nil {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(backendgroup:%s)", state.ClusterID, poolIDObj.Id)
 				}
 			}
 			// Delete ELB
-			if err := elbClient.DeleteLoadBalancer(ctx, state.APIServerELBID); err != nil {
+			if _, err := elb.DeleteLoadBalancer(elbClient, state.APIServerELBID); err != nil {
 				logrus.WithError(err).Warnf("error cleaning up cluster %s(elb:%s)", state.ClusterID, state.APIServerELBID)
 			}
 		case source == "eip" && state.ClusterEIPID != "":
-			info := common.EipAssocArg{
-				Port: common.PortDesc{},
-			}
-			if _, err := networkClient.UpdateEIP(ctx, state.ClusterEIPID, &info); err != nil {
+			if _, err := network.UpdatePublicip(networkClientV2, state.ClusterEIPID); err != nil {
 				continue
 			}
 		}
 	}
 }
 
-func getClusterRequestFromState(state state) *common.ClusterInfo {
-	clusterReq := &common.ClusterInfo{
-		Kind:       "cluster",
-		APIVersion: "v3",
-		MetaData: common.MetaInfo{
-			Name:   state.DisplayName,
-			Labels: state.ClusterLabels,
-		},
-		Spec: common.SpecInfo{
-			ClusterType: state.ClusterType,
-			Flavor:      state.ClusterFlavor,
-			K8sVersion:  state.ClusterVersion,
-			HostNetwork: &common.NetworkInfo{
-				Vpc:           state.VpcID,
-				Subnet:        state.SubnetID,
-				HighwaySubnet: state.HighwaySubnet,
-			},
-			ContainerNetwork: &common.ContainerNetworkInfo{
-				Mode: state.ContainerNetworkMode,
-				Cidr: state.ContainerNetworkCidr,
-			},
-			BillingMode: state.ClusterBillingMode,
-			Authentication: common.Authentication{
-				Mode: state.AuthMode,
-			},
-		},
-	}
-	if state.AuthMode == "authenticating_proxy" {
-		clusterReq.Spec.Authentication.AuthenticatingProxy.Ca = state.AuthenticatingProxyCa
-	}
-	return clusterReq
-}
-
-func storeState(info *types.ClusterInfo, state state) error {
+func storeState(info *types.ClusterInfo, state common.State) error {
 	data, err := json.Marshal(state)
 
 	if err != nil {
@@ -598,20 +500,25 @@ func (d *CCEDriver) setNodeCount(ctx context.Context, clusterInfo *types.Cluster
 	if err != nil {
 		return err
 	}
-	cceClient := cce.NewClient(getHuaweiBaseClient(state))
-	nodeList, err := cceClient.GetNodes(ctx, state.ClusterID)
+	baseClient := getHuaweiBaseClient(state)
+	cceClient := cce.GetCCEServiceClient(baseClient)
+	request := &model.ListNodesRequest{}
+	request.ClusterId = state.ClusterID
+	nodeList, err := cceClient.ListNodes(request)
 	if err != nil {
 		return err
 	}
-	existedNodeNum := int64(len(nodeList.Items))
+	existedNodeNum := int64(len(*nodeList.Items))
 	if count > existedNodeNum {
-		nodes := getNodeRequirement(state, count-existedNodeNum)
-		if _, err := cceClient.AddNode(ctx, state.ClusterID, nodes); err != nil {
+		if _, err := cce.CreateNodes(ctx, request.ClusterId, cceClient, &state, int32(count-existedNodeNum)); err != nil {
 			return fmt.Errorf("error adding nodes to cluster: %v", err)
 		}
 	} else if count < existedNodeNum {
-		if deletedCount, err := cceClient.DeleteNodes(ctx, state.ClusterID, int(existedNodeNum-count)); err != nil {
-			return fmt.Errorf("error deleting nodes from cluster: %v, deleted %d", err, deletedCount)
+		index := existedNodeNum - count
+		nodeListItems := *nodeList.Items
+		deleteNodeList := nodeListItems[:index]
+		if err := cce.DeleteNodes(ctx, state.ClusterID, cceClient, deleteNodeList); err != nil {
+			return fmt.Errorf("error deleting nodes from cluster: %v", err)
 		}
 	}
 	logrus.Info("set cluster node count success")
