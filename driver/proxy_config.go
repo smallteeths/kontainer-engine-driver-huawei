@@ -1,4 +1,4 @@
-package main
+package driver
 
 type nginxConfig struct {
 	APIServerHost string

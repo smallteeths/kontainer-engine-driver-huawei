@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/rancher/kontainer-engine-driver-huawei/driver"
 	"github.com/rancher/rancher/pkg/kontainer-engine/types"
 	"github.com/sirupsen/logrus"
 )
@@ -24,7 +25,7 @@ func main() {
 	}
 
 	addr := make(chan string)
-	go types.NewServer(&CCEDriver{}, addr).ServeOrDie(fmt.Sprintf("127.0.0.1:%v", port))
+	go types.NewServer(&driver.CCEDriver{}, addr).ServeOrDie(fmt.Sprintf("127.0.0.1:%v", port))
 
 	logrus.Infof("huawei cce driver 2 up and running on at %v", <-addr)
 

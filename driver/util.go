@@ -1,128 +1,25 @@
-package main
+package driver
 
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"net/url"
-	"strings"
-	"text/template"
-	"time"
-
-	"github.com/cnrancher/huaweicloud-sdk/cce"
-	"github.com/cnrancher/huaweicloud-sdk/common"
-	"github.com/cnrancher/huaweicloud-sdk/elb"
-	"github.com/cnrancher/huaweicloud-sdk/network"
-	"github.com/pkg/errors"
+	huawei_cce "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/cce/v3"
+	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/cce/v3/model"
+	"github.com/rancher/kontainer-engine-driver-huawei/cce"
+	"github.com/rancher/kontainer-engine-driver-huawei/common"
 	"github.com/rancher/rancher/pkg/kontainer-engine/types"
-	v3 "github.com/rancher/types/apis/management.cattle.io/v3"
 	"github.com/sirupsen/logrus"
-	"gopkg.in/yaml.v2"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/rbac/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-)
-
-const (
-	clusterAdmin = "cluster-admin"
-	netesDefault = "netes-default"
+	"net/url"
+	"strings"
+	"text/template"
 )
 
 var configTemplate, _ = template.New("nginx-template").Parse(nginxConfigTemplate)
-
-// GenerateServiceAccountToken generate a serviceAccountToken for clusterAdmin given a rest clientset
-func GenerateServiceAccountToken(clientset kubernetes.Interface) (string, error) {
-	ctx := context.Background()
-	serviceAccount := &v1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: netesDefault,
-		},
-	}
-
-	_, err := clientset.CoreV1().ServiceAccounts(defaultNamespace).Create(ctx, serviceAccount, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return "", fmt.Errorf("error creating service account: %v", err)
-	}
-
-	adminRole := &v1beta1.ClusterRole{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: clusterAdmin,
-		},
-		Rules: []v1beta1.PolicyRule{
-			{
-				APIGroups: []string{"*"},
-				Resources: []string{"*"},
-				Verbs:     []string{"*"},
-			},
-			{
-				NonResourceURLs: []string{"*"},
-				Verbs:           []string{"*"},
-			},
-		},
-	}
-	clusterAdminRole, err := clientset.RbacV1beta1().ClusterRoles().Get(ctx, clusterAdmin, metav1.GetOptions{})
-	if err != nil {
-		clusterAdminRole, err = clientset.RbacV1beta1().ClusterRoles().Create(ctx, adminRole, metav1.CreateOptions{})
-		if err != nil {
-			return "", fmt.Errorf("error creating admin role: %v", err)
-		}
-	}
-
-	clusterRoleBinding := &v1beta1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "netes-default-clusterRoleBinding",
-		},
-		Subjects: []v1beta1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      serviceAccount.Name,
-				Namespace: "default",
-				APIGroup:  v1.GroupName,
-			},
-		},
-		RoleRef: v1beta1.RoleRef{
-			Kind:     "ClusterRole",
-			Name:     clusterAdminRole.Name,
-			APIGroup: v1beta1.GroupName,
-		},
-	}
-	if _, err = clientset.RbacV1beta1().ClusterRoleBindings().Create(ctx, clusterRoleBinding, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return "", fmt.Errorf("error creating role bindings: %v", err)
-	}
-
-	start := time.Millisecond * 250
-	for i := 0; i < 5; i++ {
-		time.Sleep(start)
-		if serviceAccount, err = clientset.CoreV1().ServiceAccounts(defaultNamespace).Get(ctx, serviceAccount.Name, metav1.GetOptions{}); err != nil {
-			return "", fmt.Errorf("error getting service account: %v", err)
-		}
-
-		if len(serviceAccount.Secrets) > 0 {
-			secret := serviceAccount.Secrets[0]
-			secretObj, err := clientset.CoreV1().Secrets(defaultNamespace).Get(ctx, secret.Name, metav1.GetOptions{})
-			if err != nil {
-				return "", fmt.Errorf("error getting secret: %v", err)
-			}
-			if token, ok := secretObj.Data["token"]; ok {
-				return string(token), nil
-			}
-		}
-		start = start * 2
-	}
-
-	return "", errors.New("failed to fetch serviceAccountToken")
-}
-
-func ConvertToRkeConfig(config string) (v3.RancherKubernetesEngineConfig, error) {
-	var rkeConfig v3.RancherKubernetesEngineConfig
-	if err := yaml.Unmarshal([]byte(config), &rkeConfig); err != nil {
-		return rkeConfig, err
-	}
-	return rkeConfig, nil
-}
 
 func fillCreateOptions(driverFlag *types.DriverFlags) {
 	driverFlag.Options["display-name"] = &types.Flag{
@@ -335,170 +232,8 @@ func fillCreateOptions(driverFlag *types.DriverFlags) {
 	}
 }
 
-func createVPC(ctx context.Context, networkClient *network.Client, state *state) (*common.VpcInfo, error) {
-	logrus.Info("setting up vpc...")
-	vpcReq := &common.VpcRequest{
-		Vpc: common.VpcSt{
-			Name: state.ClusterName + "-vpc",
-			Cidr: common.DefaultCidr,
-		},
-	}
-	rtn, err := networkClient.CreateVPC(ctx, vpcReq)
-	if err != nil {
-		return nil, errors.Wrap(err, "error creating vpc")
-	}
-	state.VpcID = rtn.Vpc.ID
-	if err = common.WaitForCompleteWithError(ctx, func(ictx context.Context) error {
-		_, err := networkClient.GetVPC(ictx, state.VpcID)
-		return err
-	}); err != nil {
-		return nil, err
-	}
-	logrus.Infof("bring up vpc %s success", state.VpcID)
-	return networkClient.GetVPC(ctx, state.VpcID)
-}
-
-func createSubnet(ctx context.Context, networkClient *network.Client, state *state) (*common.SubnetInfo, error) {
-	logrus.Info("setting up subnet...")
-	subnetReq := &common.SubnetInfo{
-		Subnet: common.Subnet{
-			Name:         state.ClusterName + "-subnet",
-			Cidr:         common.DefaultCidr,
-			GatewayIP:    common.DefaultGateway,
-			VpcID:        state.VpcID,
-			PrimaryDNS:   "114.114.114.114",
-			SecondaryDNS: "8.8.8.8",
-			DhcpEnable:   true,
-		},
-	}
-	rtn, err := networkClient.CreateSubnet(ctx, subnetReq)
-	if err != nil {
-		return nil, errors.Wrap(err, "error creating subnet")
-	}
-	state.SubnetID = rtn.Subnet.ID
-	if err = common.WaitForCompleteWithError(ctx, func(ictx context.Context) error {
-		_, err := networkClient.GetSubnet(ctx, state.SubnetID)
-		return err
-	}); err != nil {
-		return nil, err
-	}
-	logrus.Infof("set up subnet %s success", state.SubnetID)
-	return networkClient.GetSubnet(ctx, state.SubnetID)
-}
-
-func createCluster(ctx context.Context, cceClient *cce.Client, state *state) (*common.ClusterInfo, error) {
-	logrus.Info("creating cluster...")
-	clusterReq := getClusterRequestFromState(*state)
-	rtn, err := cceClient.CreateCluster(ctx, clusterReq)
-	if err != nil {
-		return nil, errors.Wrap(err, "error creating cluster")
-	}
-	state.ClusterID = rtn.MetaData.UID
-	state.ClusterJobID = rtn.Status.JobID
-	ok, _, err := cceClient.WaitForJobReadyV3(ctx, 20*time.Second, 30*time.Minute, state.ClusterJobID)
-	if !ok {
-		return nil, errors.Wrapf(err, "error waiting for cluster job %s", state.ClusterJobID)
-	}
-	logrus.Infof("cluster provisioned successfully")
-	return cceClient.GetCluster(ctx, state.ClusterID)
-}
-
-func createNodes(ctx context.Context, cceClient *cce.Client, state *state) error {
-	logrus.Infof("creating worker nodes...")
-	nodeReq := getNodeRequirement(*state, state.NodeConfig.NodeCount)
-	_, err := cceClient.AddNode(ctx, state.ClusterID, nodeReq)
-	if err != nil {
-		logrus.WithError(err).Warnf("trying to create node for cluster %s again", state.ClusterID)
-		_, err = cceClient.AddNode(ctx, state.ClusterID, nodeReq)
-		//retry fail
-		if err != nil {
-			return errors.Wrap(err, "error when creating node(s) for cluster")
-		}
-	}
-	if err := common.CustomWaitForCompleteUntilTrue(ctx, 20*time.Second, 10*time.Minute, func(ictx context.Context) (bool, error) {
-		nodeList, err := cceClient.GetNodes(ictx, state.ClusterID)
-		if err != nil {
-			return false, err
-		}
-		for _, node := range nodeList.Items {
-			if node.Status.Phase != "Active" {
-				return false, nil
-			}
-		}
-		return true, nil
-	}); err != nil {
-		logrus.WithError(err).Errorf("error creating nodes for cluster %s", state.ClusterID)
-		return errors.Wrapf(err, "error creating nodes for cluster %s", state.ClusterID)
-	}
-	logrus.Info("creating worker nodes complete")
-	return nil
-}
-
-func createEIP(ctx context.Context, networkClient *network.Client, state *state) (*common.EipInfo, error) {
-	logrus.Info("creating EIP ...")
-	eipReq := &common.EipAllocArg{
-		EipDesc: common.PubIP{
-			Type: "5_bgp",
-		},
-		BandWidth: common.BandwidthDesc{
-			Name:    state.ClusterName,
-			Size:    10,
-			ShrType: "PER",
-			ChgMode: "traffic",
-		},
-	}
-	rtn, err := networkClient.CreateEIP(ctx, eipReq)
-	if err != nil {
-		return nil, fmt.Errorf("error creating eip for cluster %s", state.ClusterID)
-	}
-	state.ClusterEIPID = rtn.ID
-	logrus.Info("create EIP success")
-	return rtn, nil
-}
-
-func createELB(ctx context.Context, elbClient *elb.Client, eip *common.EipInfo, state *state) (*common.LoadBalancerInfo, error) {
-	logrus.Info("creating ELB")
-	input := common.LoadBalancerRequest{
-		Loadbalancer: common.LoadbalancerObject{
-			ProjectId: elbClient.ProjectID,
-			UpdatableLoadBalancerAttribute: common.UpdatableLoadBalancerAttribute{
-				Name:        state.ClusterName + "-entrypoint",
-				Description: fmt.Sprintf("ELB for cce cluster %s api server", state.ClusterName),
-			},
-			VipSubnetID: state.VipSubnetID,
-		},
-	}
-
-	info, err := elbClient.CreateLoadBalancer(ctx, &input)
-	if err != nil {
-		return nil, err
-	}
-	logrus.Info("create ELB success")
-	state.APIServerELBID = info.Loadbalancer.ID
-	return info, nil
-}
-
-func createListener(ctx context.Context, elbClient *elb.Client, state *state) (*common.ELBListenerInfo, error) {
-	logrus.Infof("creating listener for %s ...", state.APIServerELBID)
-	input := common.ELBListenerRequest{
-		Listener: common.ELBListenerRequestObject{
-			LoadbalancerId: state.APIServerELBID,
-			Protocol:       "TCP",
-			ProtocolPort:   5443,
-			Name:           state.ClusterName + "-apiserver",
-			Description:    fmt.Sprintf("proxy cce cluster %s apiserver", state.ClusterName),
-		},
-	}
-	resp, err := elbClient.CreateListener(ctx, &input)
-	if err != nil {
-		return nil, err
-	}
-	logrus.Info("create listener success")
-	return resp, nil
-}
-
-func getStateFromOptions(driverOptions *types.DriverOptions) (state, error) {
-	state := state{
+func getStateFromOptions(driverOptions *types.DriverOptions) (common.State, error) {
+	state := common.State{
 		NodeConfig: &common.NodeConfig{
 			NodeLabels: map[string]string{},
 			PublicIP: common.PublicIP{
@@ -572,77 +307,11 @@ func getStateFromOptions(driverOptions *types.DriverOptions) (state, error) {
 	}
 	logrus.Debugf("state is %#v", state)
 	logrus.Debugf("node config is %#v", *state.NodeConfig)
-	return state, state.validate()
+	return state, state.Validate()
 }
 
-func getNodeRequirement(state state, count int64) *common.NodeInfo {
-	nodeconf := &common.NodeInfo{
-		Kind:       "Node",
-		APIVersion: "v3",
-		MetaData: common.NodeMetaInfo{
-			Name:   state.DisplayName,
-			Labels: state.NodeConfig.NodeLabels,
-		},
-		Spec: common.NodeSpecInfo{
-			Flavor:        state.NodeConfig.NodeFlavor,
-			AvailableZone: state.NodeConfig.AvailableZone,
-			Login: common.NodeLogin{
-				SSHKey: state.NodeConfig.SSHName,
-				UserPassword: common.UserPassword{
-					UserName: state.NodeConfig.UserPassword.UserName,
-					Password: state.NodeConfig.UserPassword.Password,
-				},
-			},
-			RootVolume: common.NodeVolume{
-				Size:       state.NodeConfig.RootVolumeSize,
-				VolumeType: state.NodeConfig.RootVolumeType,
-			},
-			DataVolumes: []common.NodeVolume{
-				{
-					Size:       state.NodeConfig.DataVolumeSize,
-					VolumeType: state.NodeConfig.DataVolumeType,
-				},
-			},
-			PublicIP:        common.PublicIP{},
-			Count:           count,
-			BillingMode:     state.NodeConfig.BillingMode,
-			OperationSystem: state.NodeConfig.NodeOperationSystem,
-			ExtendParam:     nil,
-		},
-	}
-
-	extendParam := common.ExtendParam{
-		BMSPeriodType:  state.NodeConfig.ExtendParam.BMSPeriodType,
-		BMSPeriodNum:   state.NodeConfig.ExtendParam.BMSPeriodNum,
-		BMSIsAutoRenew: state.NodeConfig.ExtendParam.BMSIsAutoRenew,
-	}
-
-	if state.NodeConfig.ExtendParam.BMSPeriodType != "" &&
-		state.NodeConfig.ExtendParam.BMSPeriodNum != 0 &&
-		state.NodeConfig.ExtendParam.BMSIsAutoRenew != "" {
-		nodeconf.Spec.ExtendParam = &extendParam
-	}
-
-	if len(state.NodeConfig.PublicIP.Ids) > 0 {
-		nodeconf.Spec.PublicIP.Ids = state.NodeConfig.PublicIP.Ids
-	}
-	if state.NodeConfig.PublicIP.Count > 0 {
-		nodeconf.Spec.PublicIP.Count = state.NodeConfig.PublicIP.Count
-		nodeconf.Spec.PublicIP.Eip = &common.Eip{
-			Iptype: state.NodeConfig.PublicIP.Eip.Iptype,
-			Bandwidth: common.Bandwidth{
-				ChargeMode: state.NodeConfig.PublicIP.Eip.Bandwidth.ChargeMode,
-				Size:       state.NodeConfig.PublicIP.Eip.Bandwidth.Size,
-				ShareType:  state.NodeConfig.PublicIP.Eip.Bandwidth.ShareType,
-			},
-		}
-	}
-
-	return nodeconf
-}
-
-func createDefaultNamespace(ctx context.Context, client *cce.K8sClient) error {
-	if _, err := client.CoreV1Client.Namespaces().Create(ctx, &v1.Namespace{
+func createDefaultNamespace(ctx context.Context, client kubernetes.Interface) error {
+	if _, err := client.CoreV1().Namespaces().Create(ctx, &v1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: defaultNamespace,
 		},
@@ -652,7 +321,7 @@ func createDefaultNamespace(ctx context.Context, client *cce.K8sClient) error {
 	return nil
 }
 
-func createNginxConfig(ctx context.Context, client *cce.K8sClient, apiserver string) (*v1.ConfigMap, error) {
+func createNginxConfig(ctx context.Context, client kubernetes.Interface, apiserver string) (*v1.ConfigMap, error) {
 	logrus.Info("creating nginx config for cluster apiserver proxy..")
 	entry := nginxConfig{
 		APIServerHost: apiserver,
@@ -670,14 +339,14 @@ func createNginxConfig(ctx context.Context, client *cce.K8sClient, apiserver str
 			"nginx.conf": configBuf.String(),
 		},
 	}
-	if _, err := client.CoreV1Client.ConfigMaps(defaultNamespace).Create(ctx, &rtn, metav1.CreateOptions{}); err != nil {
+	if _, err := client.CoreV1().ConfigMaps(defaultNamespace).Create(ctx, &rtn, metav1.CreateOptions{}); err != nil {
 		return nil, err
 	}
 	logrus.Infof("create nginx proxy config[%s/%s] success", rtn.Namespace, rtn.Name)
 	return &rtn, nil
 }
 
-func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1.ConfigMap) error {
+func createNginxDaemonSet(ctx context.Context, client kubernetes.Interface, config *v1.ConfigMap) error {
 	logrus.Info("creating nginx proxy daemon set...")
 	labels := map[string]string{
 		"app": "apiserver-proxy",
@@ -699,7 +368,7 @@ func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1
 				Spec: v1.PodSpec{
 					HostNetwork: true,
 					Volumes: []v1.Volume{
-						v1.Volume{
+						{
 							Name: "conf",
 							VolumeSource: v1.VolumeSource{
 								ConfigMap: &v1.ConfigMapVolumeSource{
@@ -711,11 +380,11 @@ func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1
 						},
 					},
 					Containers: []v1.Container{
-						v1.Container{
+						{
 							Name:  "apiserver-proxy",
 							Image: "nginx",
 							Ports: []v1.ContainerPort{
-								v1.ContainerPort{
+								{
 									Name:          "nginx",
 									Protocol:      v1.ProtocolTCP,
 									ContainerPort: 3389,
@@ -723,7 +392,7 @@ func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1
 								},
 							},
 							VolumeMounts: []v1.VolumeMount{
-								v1.VolumeMount{
+								{
 									Name:      "conf",
 									MountPath: "/etc/nginx/nginx.conf",
 									SubPath:   "nginx.conf",
@@ -735,15 +404,15 @@ func createNginxDaemonSet(ctx context.Context, client *cce.K8sClient, config *v1
 			},
 		},
 	}
-	if _, err := client.AppsV1Client.DaemonSets(defaultNamespace).Create(ctx, &daemonSet, metav1.CreateOptions{}); err != nil {
+	if _, err := client.AppsV1().DaemonSets(defaultNamespace).Create(ctx, &daemonSet, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 	logrus.Info("create nginx proxy daemon set success")
 	return nil
 }
 
-func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo *common.ClusterInfo, state *state) ([]common.NodeInfo, error) {
-	k8sClient, err := cce.GetClusterClient(clusterInfo, client)
+func createProxyDaemonSets(ctx context.Context, cceClient *huawei_cce.CceClient, clusterInfo *model.ShowClusterResponse) (*[]model.Node, error) {
+	k8sClient, err := cce.GetClusterClient(clusterInfo, cceClient)
 	if err != nil {
 		return nil, err
 	}
@@ -754,9 +423,9 @@ func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo 
 
 	var config *v1.ConfigMap
 	address := ""
-	for _, endpoint := range clusterInfo.Status.Endpoints {
-		if endpoint.Type == "Internal" {
-			u, err := url.Parse(endpoint.URL)
+	for _, endpoint := range *clusterInfo.Status.Endpoints {
+		if *endpoint.Type == "Internal" {
+			u, err := url.Parse(*endpoint.Url)
 			if err != nil {
 				return nil, err
 			}
@@ -770,49 +439,13 @@ func createProxyDaemonSets(ctx context.Context, client *cce.Client, clusterInfo 
 	if err := createNginxDaemonSet(ctx, k8sClient, config); err != nil {
 		return nil, err
 	}
+	request := &model.ListNodesRequest{}
+	request.ClusterId = *clusterInfo.Metadata.Uid
 
-	nodes, err := client.GetNodes(ctx, clusterInfo.MetaData.UID)
+	nodes, err := cceClient.ListNodes(request)
 	if err != nil {
 		return nil, err
 	}
 
 	return nodes.Items, nil
-}
-
-func addBackends(ctx context.Context, listenerID string, elbClient *elb.Client, backends []common.NodeInfo, state *state) (common.ELBBackendGroupDetails, error) {
-	logrus.Infof("creating backends for listener %s", listenerID)
-	backendGroupInput := common.ELBBackendGroupRequest{
-		Pool: common.ELBBackendGroup{
-			Protocol:       "TCP",
-			LbAlgorithm:    "ROUND_ROBIN",
-			ListenerID:     listenerID,
-			LoadbalancerID: "",
-		},
-	}
-	var err error
-	var backendGroup common.ELBBackendGroupDetails
-
-	if backendGroup, err = elbClient.AddBackendGroup(ctx, backendGroupInput); err != nil {
-		return common.ELBBackendGroupDetails{}, err
-	}
-	state.PoolID = backendGroup.Pool.ID
-	for _, backend := range backends {
-		backendInput := common.ELBBackendRequest{
-			Member: common.ELBBackend{
-				Address:      backend.Status.PrivateIP,
-				ProtocolPort: 3389,
-				SubnetID:     state.VipSubnetID,
-			},
-		}
-		if _, err = elbClient.AddBackend(ctx, state.PoolID, backendInput); err != nil {
-			return common.ELBBackendGroupDetails{}, err
-		}
-	}
-	logrus.Info("create backend success")
-	return backendGroup, err
-
-}
-
-func deleteBackendForELB(ctx context.Context, poolID string, elbClient *elb.Client) error {
-	return elbClient.RemoveBackendGroup(ctx, poolID)
 }
