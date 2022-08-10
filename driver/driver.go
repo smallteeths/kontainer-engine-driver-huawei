@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/cce/v3/model"
-	elb_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model"
+	elb_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2/model"
 	"github.com/pkg/errors"
 	"github.com/rancher/kontainer-engine-driver-huawei/cce"
 	"github.com/rancher/kontainer-engine-driver-huawei/common"
@@ -81,8 +81,8 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 	eipClient := network.NewEipClient(baseClient)
 	cleanUpResources := []string{}
 	clusterinfo := types.ClusterInfo{}
-	var elbInfo *elb_model.CreateLoadBalancerResponse
-	var listenerInfo *elb_model.Listener
+	var elbInfo *elb_model.CreateLoadbalancerResponse
+	var listenerInfo *elb_model.ListenerResp
 	//resource cleanup defer
 	defer func() {
 		if rtnerr != nil && len(cleanUpResources) != 0 {
@@ -114,7 +114,7 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 			if elbInfo, err = elb.CreateELB(elbClient, &state); err != nil {
 				return nil, err
 			}
-			state.APIServerELBID = *elbInfo.LoadbalancerId
+			state.APIServerELBID = elbInfo.Loadbalancer.Id
 		} else {
 			if _, err = elb.GetLoadBalancer(elbClient, state.APIServerELBID); err != nil {
 				return nil, err
@@ -127,7 +127,7 @@ func (d *CCEDriver) Create(ctx context.Context, opts *types.DriverOptions, clust
 		for _, listener := range *listeners.Listeners {
 			hasLoadbalancerID := false
 			for _, loadbalancer := range listener.Loadbalancers {
-				if *loadbalancer.Id == *elbInfo.LoadbalancerId {
+				if loadbalancer.Id == elbInfo.Loadbalancer.Id {
 					hasLoadbalancerID = true
 				}
 			}
@@ -419,60 +419,69 @@ func deleteResources(ctx context.Context, state common.State, sources []string) 
 			if _, err := network.DeleteSubnet(networkClient, state.VpcID, state.SubnetID); err != nil {
 				logrus.WithError(err).Warnf("error cleaning up subnet %s", state.SubnetID)
 			}
-		case source == "cluster" && state.ClusterID != "":
-			logrus.Infof("cleaning up cluster %s", state.ClusterID)
-
-			if _, err := cce.DeleteCluster(cceClient, state.ClusterID); err != nil {
-				logrus.WithError(err).Warnf("error cleaning up cluster %s", state.ClusterID)
-			}
-		case source == "elb" && state.APIServerELBID != "":
-			logrus.Infof("cleaning up elb %s", state.APIServerELBID)
-			// Query ELB listeners
-			lbInfo, _ := elb.GetLoadBalancer(elbClient, state.APIServerELBID)
-			listenerIDList := lbInfo.Loadbalancer.Listeners
-			// Release ELB listeners
-			for _, listenerIDObj := range listenerIDList {
-				if _, err := elb.UpdateListener(elbClient, listenerIDObj.Id); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(update listener:%s)", state.ClusterID, listenerIDObj.Id)
-				}
-			}
-			// Delete ELB listeners
-			for _, listenerIDObj := range listenerIDList {
-				if _, err := elb.DeleteListener(elbClient, listenerIDObj.Id); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(delete listener:%s)", state.ClusterID, listenerIDObj.Id)
-				}
-			}
-			// Query Pools
-			poolIDList := lbInfo.Loadbalancer.Pools
-			for _, poolIDObj := range poolIDList {
-				pool, _ := elb.ShowPool(elbClient, poolIDObj.Id)
-				hlID := pool.Pool.HealthmonitorId
-				// Delete HealthMonitor
-				if _, err := elb.DeleteHealthcheck(elbClient, hlID); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(healthmonitor:%s)", state.ClusterID, hlID)
-				}
-				poolID := pool.Pool.Id
-				members := pool.Pool.Members
-				// Delete Members
-				for _, memberIDObj := range members {
-					if _, err := elb.DeleteMember(elbClient, poolID, memberIDObj.Id); err != nil {
-						logrus.WithError(err).Warnf("error cleaning up cluster %s(backend:%s-%s)", state.ClusterID, poolID, memberIDObj.Id)
-					}
-				}
-			}
-			// Delete Pools
-			for _, poolIDObj := range poolIDList {
-				if _, err := elb.DeletePool(elbClient, poolIDObj.Id); err != nil {
-					logrus.WithError(err).Warnf("error cleaning up cluster %s(backendgroup:%s)", state.ClusterID, poolIDObj.Id)
-				}
-			}
-			// Delete ELB
-			if _, err := elb.DeleteLoadBalancer(elbClient, state.APIServerELBID); err != nil {
-				logrus.WithError(err).Warnf("error cleaning up cluster %s(elb:%s)", state.ClusterID, state.APIServerELBID)
-			}
 		case source == "eip" && state.ClusterEIPID != "":
 			if _, err := network.UpdatePublicip(networkClientV2, state.ClusterEIPID); err != nil {
 				continue
+			}
+		case source == "cluster" && state.ClusterID != "":
+			if state.APIServerELBID != "" {
+				logrus.Infof("cleaning up elb %s", state.APIServerELBID)
+				// Query ELB listeners
+				lbInfo, _ := elb.GetLoadBalancer(elbClient, state.APIServerELBID)
+				// Query Pools
+				poolIDList := lbInfo.Loadbalancer.Pools
+				for _, poolIDObj := range poolIDList {
+					pool, _ := elb.ShowPool(elbClient, poolIDObj.Id)
+					hlID := pool.Pool.HealthmonitorId
+					// Delete HealthMonitor
+					if hlID != "" {
+						logrus.Infof("cleaning up HealthmonitorId %s", hlID)
+						if _, err := elb.DeleteHealthcheck(elbClient, hlID); err != nil {
+							logrus.WithError(err).Warnf("error cleaning up cluster %s(healthmonitor:%s)", state.ClusterID, hlID)
+						}
+					}
+					poolID := pool.Pool.Id
+					members := pool.Pool.Members
+					// Delete Members
+					for _, memberIDObj := range members {
+						logrus.Infof("cleaning up member %s", memberIDObj.Id)
+						if _, err := elb.DeleteMember(elbClient, poolID, memberIDObj.Id); err != nil {
+							logrus.WithError(err).Warnf("error cleaning up cluster %s(backend:%s-%s)", state.ClusterID, poolID, memberIDObj.Id)
+						}
+					}
+				}
+				// Delete Pools
+				for _, poolIDObj := range poolIDList {
+					logrus.Infof("cleaning up poolIDObj %s", poolIDObj.Id)
+					if _, err := elb.DeletePool(elbClient, poolIDObj.Id); err != nil {
+						logrus.WithError(err).Warnf("error cleaning up cluster %s(backendgroup:%s)", state.ClusterID, poolIDObj.Id)
+					}
+				}
+				listenerIDList := lbInfo.Loadbalancer.Listeners
+				// Release ELB listeners
+				for _, listenerIDObj := range listenerIDList {
+					if _, err := elb.UpdateListener(elbClient, listenerIDObj.Id); err != nil {
+						logrus.WithError(err).Warnf("error cleaning up cluster %s(update listener:%s)", state.ClusterID, listenerIDObj.Id)
+					}
+				}
+				// Delete ELB listeners
+				for _, listenerIDObj := range listenerIDList {
+					if _, err := elb.DeleteListener(elbClient, listenerIDObj.Id); err != nil {
+						logrus.WithError(err).Warnf("error cleaning up cluster %s(delete listener:%s)", state.ClusterID, listenerIDObj.Id)
+					}
+				}
+				// Delete ELB
+				if _, err := elb.DeleteLoadBalancer(elbClient, state.APIServerELBID); err != nil {
+					logrus.Infof("cleaning up DeleteLoadBalancer %s", state.APIServerELBID)
+					logrus.WithError(err).Warnf("error cleaning up cluster %s(elb:%s)", state.ClusterID, state.APIServerELBID)
+				}
+			}
+			logrus.Infof("cleaning up cluster %s", state.ClusterID)
+			if rtn, err := cce.DeleteCluster(cceClient, state.ClusterID); err != nil {
+				ok, _, err := common.WaitForJobReadyV3(ctx, cceClient, 20*time.Second, 30*time.Minute, *rtn.Status.JobID)
+				if !ok {
+					logrus.WithError(err).Warnf("error cleaning up cluster %s", state.ClusterID)
+				}
 			}
 		}
 	}

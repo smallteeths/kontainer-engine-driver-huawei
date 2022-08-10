@@ -60,6 +60,7 @@ func GetClusterRequestFromState(state State) *model.CreateClusterRequest {
 				Vpc:    state.VpcID,
 				Subnet: state.SubnetID,
 			},
+			KubernetesSvcIpRange: &state.KubernetesSvcIPRange,
 			ContainerNetwork: &model.ContainerNetwork{
 				Mode: containerNetWorkMode,
 				Cidr: &state.ContainerNetworkCidr,

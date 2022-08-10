@@ -231,6 +231,10 @@ func fillCreateOptions(driverFlag *types.DriverFlags) {
 		Type:  types.StringType,
 		Usage: "VipSubnetID",
 	}
+	driverFlag.Options["kubernetes-svc-ip-range"] = &types.Flag{
+		Type:  types.StringType,
+		Usage: "KubernetesSvcIPRange",
+	}
 }
 
 func getStateFromOptions(driverOptions *types.DriverOptions) (common.State, error) {
@@ -258,6 +262,7 @@ func getStateFromOptions(driverOptions *types.DriverOptions) (common.State, erro
 	state.SubnetID = getValueFromDriverOptions(driverOptions, types.StringType, "subnet-id", "subnetId").(string)
 	state.ContainerNetworkMode = getValueFromDriverOptions(driverOptions, types.StringType, "container-network-mode", "containerNetworkMode").(string)
 	state.ContainerNetworkCidr = getValueFromDriverOptions(driverOptions, types.StringType, "container-network-cidr", "containerNetworkCidr").(string)
+	state.KubernetesSvcIPRange = getValueFromDriverOptions(driverOptions, types.StringType, "kubernetes-svc-ip-range", "kubernetesSvcIpRange").(string)
 	state.HighwaySubnet = getValueFromDriverOptions(driverOptions, types.StringType, "highway-subnet", "highwaySubnet").(string)
 	state.NodeConfig.NodeFlavor = getValueFromDriverOptions(driverOptions, types.StringType, "node-flavor", "nodeFlavor").(string)
 	state.NodeConfig.AvailableZone = getValueFromDriverOptions(driverOptions, types.StringType, "available-zone", "availableZone").(string)
