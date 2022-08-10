@@ -39,6 +39,7 @@ type State struct {
 	ClusterLabels         map[string]string
 	ContainerNetworkMode  string
 	ContainerNetworkCidr  string
+	KubernetesSvcIPRange  string
 	VpcID                 string
 	SubnetID              string
 	VipSubnetID           string

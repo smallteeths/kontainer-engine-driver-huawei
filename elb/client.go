@@ -5,9 +5,9 @@ import (
 
 	"github.com/huaweicloud/huaweicloud-sdk-go-v3/core/auth/basic"
 	cce_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/cce/v3/model"
-	huawei_elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3"
-	elb_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model"
-	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/region"
+	huawei_elb "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2"
+	elb_model "github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2/model"
+	"github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2/region"
 	"github.com/rancher/kontainer-engine-driver-huawei/common"
 	"github.com/sirupsen/logrus"
 )
@@ -28,21 +28,20 @@ func NewElbClient(baseClient *common.Client) *huawei_elb.ElbClient {
 	return client
 }
 
-func CreateELB(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_model.CreateLoadBalancerResponse, error) {
+func CreateELB(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_model.CreateLoadbalancerResponse, error) {
 	logrus.Info("creating ELB")
-
-	request := &elb_model.CreateLoadBalancerRequest{}
+	request := &elb_model.CreateLoadbalancerRequest{}
 	name := state.ClusterName + "-entrypoint"
 	description := fmt.Sprintf("ELB for cce cluster %s api server", state.ClusterName)
-	loadbalancerbody := &elb_model.CreateLoadBalancerOption{
+	loadbalancerbody := &elb_model.CreateLoadbalancerReq{
 		Name:        &name,
 		Description: &description,
-		VpcId:       &state.VipSubnetID,
+		VipSubnetId: state.VipSubnetID,
 	}
-	request.Body = &elb_model.CreateLoadBalancerRequestBody{
+	request.Body = &elb_model.CreateLoadbalancerRequestBody{
 		Loadbalancer: loadbalancerbody,
 	}
-	info, err := elbClient.CreateLoadBalancer(request)
+	info, err := elbClient.CreateLoadbalancer(request)
 	if err != nil {
 		return nil, err
 	}
@@ -51,10 +50,10 @@ func CreateELB(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_model
 	return info, nil
 }
 
-func GetLoadBalancer(elbClient *huawei_elb.ElbClient, elbID string) (*elb_model.ShowLoadBalancerResponse, error) {
-	request := &elb_model.ShowLoadBalancerRequest{}
+func GetLoadBalancer(elbClient *huawei_elb.ElbClient, elbID string) (*elb_model.ShowLoadbalancerResponse, error) {
+	request := &elb_model.ShowLoadbalancerRequest{}
 	request.LoadbalancerId = elbID
-	loadBalancerResponse, err := elbClient.ShowLoadBalancer(request)
+	loadBalancerResponse, err := elbClient.ShowLoadbalancer(request)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +74,7 @@ func ListListeners(elbClient *huawei_elb.ElbClient) (*elb_model.ListListenersRes
 func UpdateListener(elbClient *huawei_elb.ElbClient, listenerID string) (*elb_model.UpdateListenerResponse, error) {
 	request := &elb_model.UpdateListenerRequest{}
 	request.ListenerId = listenerID
-	listenerbody := &elb_model.UpdateListenerOption{}
+	listenerbody := &elb_model.UpdateListenerReq{}
 	request.Body = &elb_model.UpdateListenerRequestBody{
 		Listener: listenerbody,
 	}
@@ -96,15 +95,15 @@ func DeleteListener(elbClient *huawei_elb.ElbClient, listenerID string) (*elb_mo
 	return response, nil
 }
 
-func CreateListener(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_model.Listener, error) {
+func CreateListener(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_model.ListenerResp, error) {
 	logrus.Infof("creating listener for %s ...", state.APIServerELBID)
 	name := state.ClusterName + "-apiserver"
 	description := fmt.Sprintf("proxy cce cluster %s apiserver", state.ClusterName)
 	request := &elb_model.CreateListenerRequest{
 		Body: &elb_model.CreateListenerRequestBody{
-			Listener: &elb_model.CreateListenerOption{
+			Listener: &elb_model.CreateListenerReq{
 				LoadbalancerId: state.APIServerELBID,
-				Protocol:       "TCP",
+				Protocol:       elb_model.GetCreateListenerReqProtocolEnum().TCP,
 				ProtocolPort:   5443,
 				Name:           &name,
 				Description:    &description,
@@ -121,14 +120,13 @@ func CreateListener(elbClient *huawei_elb.ElbClient, state *common.State) (*elb_
 
 func AddBackends(listenerID string, elbClient *huawei_elb.ElbClient, backends *[]cce_model.Node, state *common.State) (*elb_model.CreatePoolResponse, error) {
 	logrus.Infof("creating backends for listener %s", listenerID)
-	LoadbalancerID := ""
 	request := &elb_model.CreatePoolRequest{
 		Body: &elb_model.CreatePoolRequestBody{
-			Pool: &elb_model.CreatePoolOption{
-				Protocol:       "TCP",
+			Pool: &elb_model.CreatePoolReq{
+				Protocol:       elb_model.GetCreatePoolReqProtocolEnum().TCP,
 				LbAlgorithm:    "ROUND_ROBIN",
 				ListenerId:     &listenerID,
-				LoadbalancerId: &LoadbalancerID,
+				LoadbalancerId: &state.APIServerELBID,
 			},
 		},
 	}
@@ -136,17 +134,19 @@ func AddBackends(listenerID string, elbClient *huawei_elb.ElbClient, backends *[
 	if err != nil {
 		return nil, err
 	}
+	logrus.Infof("creating backends success LoadbalancerId: %s", state.APIServerELBID)
 	state.PoolID = backendGroup.Pool.Id
 	for _, backend := range *backends {
 		memberRequest := &elb_model.CreateMemberRequest{
 			Body: &elb_model.CreateMemberRequestBody{
-				Member: &elb_model.CreateMemberOption{
+				Member: &elb_model.CreateMemberReq{
 					Address:      *backend.Status.PrivateIP,
 					ProtocolPort: 3389,
-					SubnetCidrId: &state.VipSubnetID,
+					SubnetId:     state.VipSubnetID,
 				},
 			},
 		}
+		memberRequest.PoolId = state.PoolID
 		if _, err = elbClient.CreateMember(memberRequest); err != nil {
 			return nil, err
 		}
@@ -165,10 +165,10 @@ func ShowPool(elbClient *huawei_elb.ElbClient, poolID string) (*elb_model.ShowPo
 	return response, nil
 }
 
-func DeleteHealthcheck(elbClient *huawei_elb.ElbClient, hlID string) (*elb_model.DeleteHealthMonitorResponse, error) {
-	request := &elb_model.DeleteHealthMonitorRequest{}
+func DeleteHealthcheck(elbClient *huawei_elb.ElbClient, hlID string) (*elb_model.DeleteHealthmonitorResponse, error) {
+	request := &elb_model.DeleteHealthmonitorRequest{}
 	request.HealthmonitorId = hlID
-	response, err := elbClient.DeleteHealthMonitor(request)
+	response, err := elbClient.DeleteHealthmonitor(request)
 	if err != nil {
 		return nil, err
 	}
@@ -196,10 +196,10 @@ func DeletePool(elbClient *huawei_elb.ElbClient, poolID string) (*elb_model.Dele
 	return response, nil
 }
 
-func DeleteLoadBalancer(elbClient *huawei_elb.ElbClient, loadBalancerID string) (*elb_model.DeleteLoadBalancerResponse, error) {
-	request := &elb_model.DeleteLoadBalancerRequest{}
+func DeleteLoadBalancer(elbClient *huawei_elb.ElbClient, loadBalancerID string) (*elb_model.DeleteLoadbalancerResponse, error) {
+	request := &elb_model.DeleteLoadbalancerRequest{}
 	request.LoadbalancerId = loadBalancerID
-	response, err := elbClient.DeleteLoadBalancer(request)
+	response, err := elbClient.DeleteLoadbalancer(request)
 	if err != nil {
 		return nil, err
 	}
