@@ -70,9 +70,10 @@ github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v2/model
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v3
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/eip/v3/model
-github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3
+github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2
+github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2/model
+github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v2/region
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/model
-github.com/huaweicloud/huaweicloud-sdk-go-v3/services/elb/v3/region
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v2
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v2/model
 github.com/huaweicloud/huaweicloud-sdk-go-v3/services/vpc/v2/region
