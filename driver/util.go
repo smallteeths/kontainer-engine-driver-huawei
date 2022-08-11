@@ -289,9 +289,7 @@ func getStateFromOptions(driverOptions *types.DriverOptions) (common.State, erro
 	state.ClusterEIPID = getValueFromDriverOptions(driverOptions, types.StringType, "cluster-eip-id", "clusterEipId").(string)
 	state.AuthMode = getValueFromDriverOptions(driverOptions, types.StringType, "authentiaction-mode", "authentiactionMode").(string)
 	state.APIServerELBID = getValueFromDriverOptions(driverOptions, types.StringType, "api-server-elb-id", "apiServerELBId").(string)
-
 	state.VipSubnetID = getValueFromDriverOptions(driverOptions, types.StringType, "vip-subnet-id", "vipSubnetId").(string)
-
 	eipIDs := getValueFromDriverOptions(driverOptions, types.StringSliceType, "eip-ids", "eipIds").(*types.StringSlice)
 	for _, eipID := range eipIDs.Value {
 		logrus.Debugf("Eip: %s", eipID)
