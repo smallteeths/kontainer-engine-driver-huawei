@@ -129,6 +129,7 @@ func getNodeRequirement(state common.State, count int32, clusterID string) *mode
 		Spec: &model.NodeSpec{
 			Flavor: state.NodeConfig.NodeFlavor,
 			Az:     state.NodeConfig.AvailableZone,
+			Os:     &state.NodeConfig.NodeOperationSystem,
 			Login: &model.Login{
 				SshKey: &state.NodeConfig.SSHName,
 				UserPassword: &model.UserPassword{
