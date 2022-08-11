@@ -290,9 +290,6 @@ func getStateFromOptions(driverOptions *types.DriverOptions) (common.State, erro
 	state.AuthMode = getValueFromDriverOptions(driverOptions, types.StringType, "authentiaction-mode", "authentiactionMode").(string)
 	state.APIServerELBID = getValueFromDriverOptions(driverOptions, types.StringType, "api-server-elb-id", "apiServerELBId").(string)
 	state.VipSubnetID = getValueFromDriverOptions(driverOptions, types.StringType, "vip-subnet-id", "vipSubnetId").(string)
-	if state.NodeConfig.PublicIP.Eip.Bandwidth.ChargeMode != "traffic" {
-		state.NodeConfig.PublicIP.Eip.Bandwidth.ChargeMode = ""
-	}
 
 	eipIDs := getValueFromDriverOptions(driverOptions, types.StringSliceType, "eip-ids", "eipIds").(*types.StringSlice)
 	for _, eipID := range eipIDs.Value {

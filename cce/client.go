@@ -168,6 +168,10 @@ func getNodeRequirement(state common.State, count int32, clusterID string) *mode
 	if len(state.NodeConfig.PublicIP.Ids) > 0 {
 		nodeconf.Spec.PublicIP.Ids = &state.NodeConfig.PublicIP.Ids
 	}
+	chargeMode := "traffic"
+	if state.NodeConfig.PublicIP.Eip.Bandwidth.ChargeMode != "traffic" {
+		chargeMode = ""
+	}
 	if state.NodeConfig.PublicIP.Count > 0 {
 		publicIPCount := int32(state.NodeConfig.PublicIP.Count)
 		eipBandwidthSize := int32(state.NodeConfig.PublicIP.Eip.Bandwidth.Size)
@@ -175,7 +179,7 @@ func getNodeRequirement(state common.State, count int32, clusterID string) *mode
 		nodeconf.Spec.PublicIP.Eip = &model.NodeEipSpec{
 			Iptype: &state.NodeConfig.PublicIP.Eip.Iptype,
 			Bandwidth: &model.NodeBandwidth{
-				Chargemode: &state.NodeConfig.PublicIP.Eip.Bandwidth.ChargeMode,
+				Chargemode: &chargeMode,
 				Size:       &eipBandwidthSize,
 				Sharetype:  &state.NodeConfig.PublicIP.Eip.Bandwidth.ShareType,
 			},
